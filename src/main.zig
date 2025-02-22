@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Client = @import("Client.zig");
 const rt_api = @import("rt_api.zig");
 const imgui = @import("imgui");
@@ -6,6 +7,15 @@ const gui = @import("graphics/gui.zig");
 const glfw = gui.glfw;
 const gl = gui.gl;
 const Context = @import("Context.zig");
+
+const lib_suffix = switch (builtin.os.tag) {
+    .windows => ".dll",
+    .linux => ".so",
+    .macos => ".dylib",
+    else => @compileError("unsupported platform"),
+};
+
+const lib_path = "zig-out/lib/";
 
 const os_tag = @import("builtin").os.tag;
 
@@ -16,33 +26,22 @@ pub fn main() !void {
     var args = try std.process.argsWithAllocator(gpa.allocator());
     defer args.deinit();
 
-    const name = args.next() orelse unreachable;
-
-    const stdout = std.io.getStdOut().writer();
-    const stderr = std.io.getStdErr().writer();
-
-    const path = args.next() orelse {
-        try stderr.print("usage: {s} <path>\n", .{name});
-        std.process.exit(1);
-    };
-
     var context = Context.init(gpa.allocator());
     defer context.deinit();
 
-    var client = Client.load(path) catch |e| {
-        try stderr.print("error: failed to load '{s}': {s}\n", .{ path, @errorName(e) });
-        std.process.exit(1);
-    };
-    defer client.unload();
+    var visualizers = std.ArrayList([*c]const u8).init(gpa.allocator());
+    defer {
+        // for (visualizers.items) |name| {
+        //     var name_non_zero: [:0]const u8 = undefined;
+        //     name_non_zero.ptr = @ptrCast(name);
+        //     gpa.allocator().free(name_non_zero);
+        // }
+        visualizers.deinit();
+    }
 
-    rt_api.fill(@ptrCast(&context), client.api.api);
-    const info = &client.api.get_info()[0];
-    try stdout.print("Name: {s}\n", .{info.name});
-    try stdout.print("Description: {s}\n", .{info.description});
+    try getVisualizers(&visualizers);
 
-    client.create();
-
-    mainGui(&context, &client);
+    try mainGui(&context, &visualizers);
 }
 
 /// Print error and code on GLFW errors.
@@ -50,7 +49,25 @@ fn errorCallback(err: c_int, msg: [*c]const u8) callconv(.C) void {
     std.log.err("Error code: {} message: {s}", .{ err, msg });
 }
 
-fn mainGui(context: *Context, client: *Client) void {
+fn getVisualizers(list: *std.ArrayList([*c]const u8)) !void {
+    list.clearRetainingCapacity();
+
+    try list.append(try list.allocator.dupeZ(u8, "<none>"));
+
+    const dir = try std.fs.cwd().openDir(lib_path, .{ .iterate = true });
+
+    var iter = dir.iterate();
+
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, lib_suffix))
+            continue;
+        const name = std.mem.sliceTo(entry.name, '.');
+        const nameZ = try list.allocator.dupeZ(u8, name);
+        try list.append(nameZ);
+    }
+}
+
+fn mainGui(context: *Context, visualizers: *std.ArrayList([*c]const u8)) !void {
     _ = glfw.glfwSetErrorCallback(errorCallback);
     if (glfw.glfwInit() == glfw.GLFW_FALSE) {
         std.log.err("Failed to init GLFW", .{});
@@ -100,7 +117,7 @@ fn mainGui(context: *Context, client: *Client) void {
         );
     }
 
-    imgui.StyleColorsDark();
+    imgui.StyleColorsLight();
 
     _ = gui.ImGui_ImplGlfw_InitForOpenGL(window, true);
     switch (gui.populate_dear_imgui_opengl_symbol_table(@ptrCast(&gui.get_proc_address))) {
@@ -120,21 +137,69 @@ fn mainGui(context: *Context, client: *Client) void {
 
     while (running) {
         glfw.glfwPollEvents();
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
 
         gui.ImGui_ImplOpenGL3_NewFrame();
         gui.ImGui_ImplGlfw_NewFrame();
         imgui.NewFrame();
+        _ = imgui.Begin("bob");
 
-        const info = client.api.get_info()[0];
-        _ = imgui.Begin(info.name);
-        context.gui_state.update();
+        var selection: c_int = 0;
+        // imgui.SeparatorText("Select visualizer");
+        if (imgui.Combo_Str_arr("Select visualizer", &selection, @ptrCast(visualizers.items.ptr), @intCast(visualizers.items.len))) {
+            std.log.info("selected index: {d}", .{selection});
+            if (context.client) |*client| {
+                std.log.info("unloading client", .{});
+                client.unload();
+                context.client = null;
+                context.gui_state.clear();
+            }
+
+            if (selection > 0) {
+                var buf = std.ArrayList(u8).init(visualizers.allocator);
+                defer buf.deinit();
+                try buf.writer().writeAll(lib_path);
+                try buf.writer().writeAll(std.mem.span(visualizers.items[@intCast(selection)]));
+                try buf.writer().writeAll(lib_suffix);
+
+                std.log.info("loading client {s}", .{buf.items});
+                context.client = Client.load(buf.items) catch |e| blk: {
+                    std.log.err("failed to load {s}: {s}", .{ buf.items, @errorName(e) });
+                    break :blk null;
+                };
+                if (context.client) |*client| {
+                    rt_api.fill(@ptrCast(context), client.api.api);
+                    client.create();
+                }
+            }
+        }
+
+        if (context.client) |*client| {
+            imgui.SameLine();
+            if (imgui.Button("Unload")) {
+                std.log.info("unloading client", .{});
+                client.unload();
+                context.client = null;
+                context.gui_state.clear();
+            }
+        }
+
+        if (context.client) |client| {
+            const info = client.api.get_info()[0];
+            imgui.SeparatorText(info.name);
+            context.gui_state.update();
+            imgui.SeparatorText("Description");
+            imgui.Text(info.description);
+        }
+
         imgui.End();
-
         imgui.EndFrame();
 
         imgui.Render();
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT);
-        client.api.update(client.ctx);
+        if (context.client) |client| {
+            client.api.update(client.ctx);
+        }
+
         gui.ImGui_ImplOpenGL3_RenderDrawData(imgui.GetDrawData());
 
         const saved_context = glfw.glfwGetCurrentContext();
