@@ -31,11 +31,12 @@ pub fn main() !void {
 
     var visualizers = std.ArrayList([*c]const u8).init(gpa.allocator());
     defer {
-        // for (visualizers.items) |name| {
-        //     var name_non_zero: [:0]const u8 = undefined;
-        //     name_non_zero.ptr = @ptrCast(name);
-        //     gpa.allocator().free(name_non_zero);
-        // }
+        for (visualizers.items) |name| {
+            var slice: [:0]const u8 = undefined;
+            slice.ptr = @ptrCast(name);
+            slice.len = std.mem.len(name);
+            gpa.allocator().free(slice);
+        }
         visualizers.deinit();
     }
 
@@ -138,6 +139,7 @@ fn mainGui(context: *Context, visualizers: *std.ArrayList([*c]const u8)) !void {
     while (running) {
         glfw.glfwPollEvents();
         gl.glClear(gl.GL_COLOR_BUFFER_BIT);
+        gl.glClearColor(0.0, 0.0, 0.0, 1.0);
 
         gui.ImGui_ImplOpenGL3_NewFrame();
         gui.ImGui_ImplGlfw_NewFrame();
