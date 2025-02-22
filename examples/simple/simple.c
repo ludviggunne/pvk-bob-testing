@@ -53,4 +53,5 @@ EXPORT void update(void *userdata)
 EXPORT void destroy(void *userdata)
 {
   (void) userdata;
+  *(volatile int*)0 = 0;
 }

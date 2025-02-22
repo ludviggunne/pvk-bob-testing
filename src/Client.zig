@@ -46,7 +46,14 @@ pub fn create(self: *Client) void {
     self.ctx = self.api.create();
 }
 
+pub fn update(self: *const Client) void {
+    self.api.update(self.ctx);
+}
+
+pub fn destroy(self: *const Client) void {
+    self.api.destroy(self.ctx);
+}
+
 pub fn unload(client: *Client) void {
-    client.api.destroy(client.ctx);
     client.lib.close();
 }

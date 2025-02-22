@@ -49,6 +49,8 @@ EXPORT void update(void *userdata)
   float b = api.get_ui_bool_value(api.context, boxb) ? 1.0f : 0.0f;
 
   glClearColor(r, g, b, 1.0f);
+
+  *(volatile int*)0 = 0;
 }
 
 EXPORT void destroy(void *userdata)

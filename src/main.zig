@@ -7,6 +7,7 @@ const gui = @import("graphics/gui.zig");
 const glfw = gui.glfw;
 const gl = gui.gl;
 const Context = @import("Context.zig");
+const signals = @import("signals.zig");
 
 const lib_suffix = switch (builtin.os.tag) {
     .windows => ".dll",
@@ -31,12 +32,7 @@ pub fn main() !void {
 
     var visualizers = std.ArrayList([*c]const u8).init(gpa.allocator());
     defer {
-        for (visualizers.items) |name| {
-            var slice: [:0]const u8 = undefined;
-            slice.ptr = @ptrCast(name);
-            slice.len = std.mem.len(name);
-            gpa.allocator().free(slice);
-        }
+        clearVisualizers(&visualizers);
         visualizers.deinit();
     }
 
@@ -51,7 +47,9 @@ fn errorCallback(err: c_int, msg: [*c]const u8) callconv(.C) void {
 }
 
 fn getVisualizers(list: *std.ArrayList([*c]const u8)) !void {
-    list.clearRetainingCapacity();
+    std.log.info("looking for visualizers in {s}", .{lib_path});
+
+    clearVisualizers(list);
 
     try list.append(try list.allocator.dupeZ(u8, "<none>"));
 
@@ -63,9 +61,20 @@ fn getVisualizers(list: *std.ArrayList([*c]const u8)) !void {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, lib_suffix))
             continue;
         const name = std.mem.sliceTo(entry.name, '.');
+        std.log.info("found visualizer {s}", .{name});
         const nameZ = try list.allocator.dupeZ(u8, name);
         try list.append(nameZ);
     }
+}
+
+fn clearVisualizers(list: *std.ArrayList([*c]const u8)) void {
+    for (list.items) |name| {
+        var slice: [:0]const u8 = undefined;
+        slice.ptr = @ptrCast(name);
+        slice.len = std.mem.len(name);
+        list.allocator.free(slice);
+    }
+    list.clearRetainingCapacity();
 }
 
 fn mainGui(context: *Context, visualizers: *std.ArrayList([*c]const u8)) !void {
@@ -149,9 +158,13 @@ fn mainGui(context: *Context, visualizers: *std.ArrayList([*c]const u8)) !void {
         var selection: c_int = 0;
         // imgui.SeparatorText("Select visualizer");
         if (imgui.Combo_Str_arr("Select visualizer", &selection, @ptrCast(visualizers.items.ptr), @intCast(visualizers.items.len))) {
-            std.log.info("selected index: {d}", .{selection});
             if (context.client) |*client| {
-                std.log.info("unloading client", .{});
+                std.log.info("unloading visualizer", .{});
+                signals.segfaultGuard();
+                client.destroy();
+                if (signals.didSegfault()) {
+                    std.log.err("visualizer received SIGSEGV in destroy()", .{});
+                }
                 client.unload();
                 context.client = null;
                 context.gui_state.clear();
@@ -164,7 +177,7 @@ fn mainGui(context: *Context, visualizers: *std.ArrayList([*c]const u8)) !void {
                 try buf.writer().writeAll(std.mem.span(visualizers.items[@intCast(selection)]));
                 try buf.writer().writeAll(lib_suffix);
 
-                std.log.info("loading client {s}", .{buf.items});
+                std.log.info("loading visualizer {s}", .{buf.items});
                 context.client = Client.load(buf.items) catch |e| blk: {
                     std.log.err("failed to load {s}: {s}", .{ buf.items, @errorName(e) });
                     break :blk null;
@@ -176,30 +189,51 @@ fn mainGui(context: *Context, visualizers: *std.ArrayList([*c]const u8)) !void {
             }
         }
 
-        if (context.client) |*client| {
-            imgui.SameLine();
-            if (imgui.Button("Unload")) {
-                std.log.info("unloading client", .{});
-                client.unload();
-                context.client = null;
-                context.gui_state.clear();
-            }
+        imgui.SameLine();
+        if (imgui.Button("Refresh")) {
+            try getVisualizers(visualizers);
         }
 
-        if (context.client) |client| {
+        if (context.client) |*client| {
+            signals.segfaultGuard();
             const info = client.api.get_info()[0];
-            imgui.SeparatorText(info.name);
-            context.gui_state.update();
-            imgui.SeparatorText("Description");
-            imgui.Text(info.description);
+            if (signals.didSegfault()) {
+                std.log.err("visualizer received SIGSEGV in get_info()", .{});
+                client.unload();
+                context.client = null;
+            } else {
+                imgui.SeparatorText(info.name);
+                // imgui.SameLine();
+                if (imgui.Button("Unload")) {
+                    std.log.info("unloading visualizer", .{});
+                    signals.segfaultGuard();
+                    client.destroy();
+                    if (signals.didSegfault()) {
+                        std.log.err("visualizer received SIGSEGV in destroy()", .{});
+                    }
+                    client.unload();
+                    context.client = null;
+                    context.gui_state.clear();
+                } else {
+                    context.gui_state.update();
+                    imgui.SeparatorText("Description");
+                    imgui.Text(info.description);
+                }
+            }
         }
 
         imgui.End();
         imgui.EndFrame();
 
         imgui.Render();
-        if (context.client) |client| {
-            client.api.update(client.ctx);
+        if (context.client) |*client| {
+            signals.segfaultGuard();
+            client.update();
+            if (signals.didSegfault()) {
+                std.log.err("visualizer received SIGSEGV in update()", .{});
+                client.unload();
+                context.client = null;
+            }
         }
 
         gui.ImGui_ImplOpenGL3_RenderDrawData(imgui.GetDrawData());
