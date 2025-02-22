@@ -1,5 +1,8 @@
 const std = @import("std");
 
+const simple_example = @import("examples/simple/build.zig");
+const checkboxes = @import("examples/checkboxes/build.zig");
+
 fn linkToGLFW(add_to: *std.Build.Step.Compile, os_tag: std.Target.Os.Tag) void {
     add_to.addIncludePath(.{ .cwd_relative = "opengl-abstraction/deps/include/" });
     add_to.addCSourceFiles(.{ .files = &.{"opengl-abstraction/deps/src/glad.c"} });
@@ -81,6 +84,10 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(imgui_glfw);
 
     b.installArtifact(exe);
+
+    // Examples
+    simple_example.build(b, target, optimize);
+    checkboxes.build(b, target, optimize);
 }
 
 const zig_imgui_build_script = @import("Zig-ImGui");
