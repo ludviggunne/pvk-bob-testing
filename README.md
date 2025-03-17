@@ -1,4 +1,5 @@
 <div align="center">
+<img src="images/bob.png">
 <h1>BoB</h1>
 <em>Blinka och Blända</em>
 
